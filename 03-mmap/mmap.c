@@ -6,93 +6,93 @@
 #include <unistd.h>
 #include <sys/mman.h>
 #include <stdlib.h>
+#include <stdint.h>
 
-// We define two CPP macros to hide the ugliness of these compiler
-// attributes.
-//
-// - section: This variable attribute pushes the variable into the
-//            named ELF section. Thereby, we let the linker collect
-//            variable definitions and concentrate them in one place
+// We define a CPP macro to hide the ugliness of compiler attributes.
 //
 // - aligned: Normally, variables can be densely packed in the
 //            data/BSS section. However, as we want to replace parts
-//            of our data section with a file mapping, we obey the
-//            MMU's granularity (4096 bytes).
-#define persistent   __attribute__((section("persistent")))
+//            of our data section with a file mapping, we have to obey
+//            the MMU's granularity (4096 bytes).
 #define PAGE_SIZE 4096
 #define page_aligned __attribute__((aligned(PAGE_SIZE)))
 
-// This is a special variable that we use in setup_persistent to
-// locate the start of the persistent section. We page align it, such
-// that its address is placed at the beginning of a page. This is
-// equivalent to an HEX address ending in 3 zeros.
-//
-// For example: &persistent_start = 0x4b8000
-//
-struct {
-	page_aligned int persistent_start;
+// This is anonymous struct describes our persistent data and a
+// variable with that type, named psec, is defined.
+struct /* anonymous */ {
+    // We mark the first variable in our struct as being page aligned.
+    // This is equivalent to a start address an address ending in 3
+    // hexadecimal zeros.
+    //
+    // By aligning the first variable in the struct, two things happen:
+    //
+    // 1. Global variables of struct persistent_section are placed at
+    //    the beginning of a page.
+    // 2. The size of the section is padded to the next multiple of
+    //    PAGE_SIZE, such that array-address calculations and pointer
+    //    arithmetik work correctly.
+    page_aligned int persistent_start;
 
+   // This is our persistent variable. We will use it as a counter,
+   // how often the program was executed.
+    int foobar;
+} psec;
 
-// This is our actual persistent variable. We will use it as a
-// counter, how often the program was executed.
-	int foobar;
-}psec={0xdeadbeef,0x1234};
-
-// Although this variable is placed between persistent_{start,end}, it
-// does *NOT* have the persistent variable, whereby it is place not
-// within the persistent section.,
+// For comparision, we also create another global variable, that is
+// initialized from the program ELF on every program start.
 int barfoo = 42;
 
-// A second special variable that marks the end of the persistent
-// region. We also make it page aligned, whereby the linker will not
-// place other
 
 int setup_persistent(char *fn) {
     // FIXME: Install persistent mapping and return 0;
-    struct stat s;
-    int r = stat(fn, &s);
+    //
+    int fd;
+   if ( (fd = open(fn, O_CREAT|O_RDWR|O_EXCL, 0600)) >= 0)
+   {
+	   int bytes = write(fd, &psec, sizeof(psec));
 
-    int fd = open(fn, O_RDWR|O_CREAT, 0600);
-    if (fd<0)
+	   if (bytes!=PAGE_SIZE)
+	   {
+		   perror("writing");
+		   return -1;
+	   }
+   }
+   else
     {
-	    perror("file open");
+	    if (errno == EEXIST)
+		    fd = open(fn, O_RDWR,0600);
+	    if (fd<0)
+	    {
+		    perror("opening file");
+		    return -1;
+	    }
+    }
+
+    void* addr = mmap(&psec, PAGE_SIZE, PROT_READ|PROT_WRITE, MAP_SHARED|MAP_FIXED, fd, 0);
+
+    if (((uint64_t) addr)<0)
+    {
+	    perror("mapping");
+	    close(fd);
 	    return -1;
     }
-    if ( r == -1 || s.st_size != sizeof(psec) )
-    {
-	    if(ftruncate(fd, sizeof(psec)) != 0)
-	    {
-		    perror("truncate");
-		    return -1;
-	    }
-	    if(write(fd, &psec, sizeof(psec)) != sizeof(psec))
-	    {
-		    perror("write");
-		    return -1;
-	    }
-    }
 
-  int *map=mmap(&psec, sizeof(psec), PROT_READ|PROT_WRITE, MAP_SHARED|MAP_FIXED, fd, 0);
+    printf("addr: %p, psec: %p\n",addr,&psec);
 
-  if (map == MAP_FAILED)
-	  return -1;
-
-   close(fd);
-		   
+    close(fd);
 
     return 0;
 }
 
 int main(int argc, char *argv[]) {
-	printf("psecsize: %ld\n", sizeof(psec));
-    printf("section persistent: %p--%p\n", &psec, &psec + 1);
+    printf("psec: %p--%p\n", &psec, &psec + 1);
     // Install the persistent mapping
     if (setup_persistent("mmap.persistent") == -1) {
         perror("setup_persistent");
         return -1;
     }
 
-    // For foobar, we see that each invokation of the programm will
+    // For psec.foobar, we see that each invokation of the programm will
     // yield an incremented result.
     // For barfoo, which is *NOT* in the persistent section, we will
     // always get the same result.
@@ -112,3 +112,4 @@ int main(int argc, char *argv[]) {
 
     return 0;
 }
+
