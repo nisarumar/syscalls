@@ -12,7 +12,7 @@
 #include <sys/time.h>
 #include <sys/syscall.h>
 #include <stdbool.h>
-
+#include <sys/wait.h>
 ////////////////////////////////////////////////////////////////
 // Layer 0: Futex System Call Helpers
 ////////////////////////////////////////////////////////////////
@@ -53,19 +53,17 @@ void sem_init(atomic_int *sem, unsigned initval) {
    decrement it. If it is already zero, we sleep until the value
    becomes larger than zero and try decrementing it again. */
 void sem_down(atomic_int *sem) {
-	while (true)
-	{
-		int current = atomic_load(sem);
-		if (current >0 )
-		{
-			if (atomic_compare_exchange_strong(sem, &current, current-1) == true)
-				break;
-		}
-		else
-		{
-			futex_wait(sem, 0);
-		}
-	}
+	int current;
+
+	do {
+		current = atomic_load(sem);
+	
+		while( (current = atomic_load(sem)) <= 0)
+			futex_wait(sem, current); // spurios wakes
+
+
+	} while(!atomic_compare_exchange_strong(sem, &current, current-1));
+
 }
 
 /* The semaphore increment operation increments the counter and wakes
@@ -74,9 +72,7 @@ void sem_down(atomic_int *sem) {
 void sem_up(atomic_int *sem) {
 	int prev = atomic_fetch_add(sem, 1);
 	if (prev == 0)
-	{
 		futex_wake(sem, 1);
-	}
 }
 
 ////////////////////////////////////////////////////////////////
@@ -104,29 +100,31 @@ struct bounded_buffer {
 };
 
 void bb_init(struct bounded_buffer *bb) {
-	sem_init( &bb->slots, ARRAY_SIZE( bb->data ) );
-	sem_init( &bb->elements, 0 );
-	bb->lock = 1;
+	sem_init(&bb->lock, 1);
+	sem_down(&bb->lock);
+	sem_init(&bb->slots, 3);
+	sem_init(&bb->elements, 0);
 	bb->read_idx = 0;
 	bb->write_idx = 0;
-
+	sem_up(&bb->lock);
 }
 
 void * bb_get(struct bounded_buffer *bb) {
-
-    void *ret = NULL;
-    sem_down(&bb->elements);
-    sem_down(&bb->lock);
-    ret = bb->data[bb->read_idx++];
-    sem_up(&bb->lock);
-    sem_up(&bb->slots);
+	 void *ret = NULL;
+	sem_down(&bb->elements);
+	sem_down(&bb->lock);
+	ret = bb->data[bb->read_idx++];
+	bb->read_idx %= 3;
+	sem_up(&bb->lock);
+	sem_up(&bb->slots);
     return ret;
 }
 
 void bb_put(struct bounded_buffer *bb, void *data) {
 	sem_down(&bb->slots);
 	sem_down(&bb->lock);
-	bb->data[bb->write_idx++]=data;
+	bb->data[bb->write_idx++] = data;
+	bb->write_idx %= 3;
 	sem_up(&bb->lock);
 	sem_up(&bb->elements);
 }
@@ -136,9 +134,6 @@ int main() {
     // First, we use mmap to establish a piece of memory that is
     // shared between the parent and the child process. The mapping is
     // 4096 bytes large a resides at the same address in the parent and the child process.
-    //
-    //
-
     char *shared_memory = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
                                MAP_ANONYMOUS | MAP_SHARED, -1, 0);
     if (shared_memory == MAP_FAILED) {
@@ -168,32 +163,30 @@ int main() {
         // Parent
 
         // Wait until the child has initialized the bounded buffer
-	sem_down(semaphore);
+	
+        printf("In parent process\n");
+        sem_down(semaphore);
 
         printf("Child has initialized the bounded buffer\n");
-	while (true)
+
+        while(true )
 	{
-		printf("%s ",(char*)bb_get(bb));
+		char * val = (char *) bb_get(bb);
+		printf("%s\n", val); //n is needed because of line buffering, need to look into it;
 	}
 
-        // FIXME: Retrieve elements from the bounded buffer
     } else {
         ////////////////////////////////////////////////////////////////
         // Child
         char *data[] = {
             "Hello", "World", "!", "How", "are", "you", "?"
         };
-        //(void)data;
-
+        (void)data;
 	sleep(1);
 	bb_init(bb);
 	sem_up(semaphore);
-	for ( int i = 0; i< ARRAY_SIZE(data); i++ )
-		bb_put( bb, data[i] );
-
-        // FIXME: Initialize the bounded buffer after sleeping a second
-        // FIXME: Wake up the parent who is waiting on semaphore
-        // FIXME: Push all char pointers through the bounded buffer to the parent.
+	for (int i = 0; i<ARRAY_SIZE(data); i++)
+		bb_put(bb, data[i]);
     }
 
     return 0;
