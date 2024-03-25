@@ -122,7 +122,52 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "[%s] Started filter as pid %d\n", procs[i].cmd, procs[i].pid);
     }
 
-    // FIXME: Read from stdin and push data to the proc[*].stdin
-    // FIXME: Use select(2)
-    // FIXME: Read from proc[*].stdout and push data to stdout
-}
+    char inBuff[4096];
+
+   int size = read(STDIN_FILENO,inBuff, 4096);
+
+   for (int i =0; i< nprocs; i++)
+	  write(procs[i].stdin, inBuff, size);
+
+
+   fd_set readfds;
+   int nfds = 0;
+   int ready = 0;
+
+   while (true)
+   {	   
+
+	   
+	   FD_ZERO(&readfds);
+
+	   for (int i =0; i<nprocs; i++)
+	   {
+	   	FD_SET(procs[i].stdout, &readfds);
+		if (nfds < procs[i].stdout)
+			nfds = procs[i].stdout;
+	   }
+
+	   ready = select(nfds+1, &readfds, NULL, NULL, NULL);
+	   if (ready == -1)
+	   {
+	   	die("select()");
+	   }
+	   else
+	   {
+		   printf(".");
+	   }
+
+	   for (int i = 0; i< nprocs; i++)
+	   {
+		   if (FD_ISSET(procs[i].stdout, &readfds)){
+
+			printf("Process no: %d\n", i);
+	
+			size = read(procs[i].stdout, inBuff, 4096);
+			
+			write(STDOUT_FILENO, inBuff, size);
+		   }
+	   }
+   }
+
+} 
