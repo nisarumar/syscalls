@@ -27,6 +27,27 @@ struct proc {
 static int nprocs;         // Number of started filter processes
 static struct proc *procs; // Dynamically-allocated array of procs
 
+void epoll_add(int epollfd, int fd, int events, uint32_t index)
+{
+	struct epoll_event ev; 
+	ev.events = events;
+	ev.data.u64 = (uint64_t) index;
+
+	if (epoll_ctl(epollfd, EPOLL_CTL_ADD, fd, &ev) == -1)
+	{
+		die("epoll_add");
+	}
+
+}
+
+void epoll_del (int epollfd, int fd)
+{
+	if (epoll_ctl(epollfd, EPOLL_CTL_DEL, fd, NULL) == -1)
+	{
+		die("epoll_del");
+	}
+}
+
 ////////////////////////////////////////////////////////////////
 // HINT: You have already seen this in the in the select exercise
 ////////////////////////////////////////////////////////////////
@@ -97,6 +118,45 @@ static int start_proc(struct proc *proc) {
 // This function prints an array of uint64_t (elements) as line with
 // throughput measures. The function throttles its output to one line
 // per second.
+//
+int copy_splice(int in_fd, int out_fd)
+{
+	static char buff[4096] = {};
+
+	int len = splice(in_fd, 0, out_fd, 0, INT_MAX, SPLICE_F_NONBLOCK);
+
+	if (len >= 0) return len;
+
+	if (errno == EAGAIN)
+		return 0;
+
+	if (errno != EINVAL) die("splice");
+
+
+	len = read(in_fd, &buff[0], sizeof(buff)); //one time as epoll is on read end and level triggered; if there is data in pipe it will generate another event;
+	if (len < 0)
+	{
+		die("read");
+	}
+
+	int bytes = 0;
+
+	while (bytes < len ) //loop because we want to write every byte; no epolling on write end;
+	{
+		int ret = write(out_fd, &buff[bytes], len);
+		if (ret < 0)
+		{
+			die ("write");
+		}
+		else
+		{
+			bytes += ret;
+		}
+
+	}
+
+	return bytes;
+}
 
 // Example Output:
 //  2860.20MiB/s 2860.26MiB/s 2860.23MiB/s 2860.25MiB/s 2860.29MiB/s
@@ -141,7 +201,79 @@ int main(int argc, char *argv[]) {
     }
 
     // FIXME: Arrange file descriptors in pairs of input -> output
+    // 2D array where 0 is read end and 1 is write end of the next process;
+    // e.g 2 processes [0][2] = {STDIIN_FILENO, PROCESS0_STDIN_WRITE_END}, [1][2]= {PROCESS0_STDOUT_READEND, PROCESS1_STDIN_WRITE_END}, [2][2]={PROCESS1_STDOUT_READEND, THIS_STDOUT_WRITE_END}
+    enum {
+	    read = 0,
+	    write,
+	    arr_sz
+    };
+
+    int fd_pairs[nprocs+1][arr_sz]; 
+    fd_pairs[0][read] = STDIN_FILENO;
+    for (int i = 0; i< nprocs; i++)
+    {
+	    fd_pairs[i][write] = procs[i].stdin;
+	    fd_pairs[i+1][read] = procs[i].stdout;
+    }
+
+    fd_pairs[nprocs][write] = STDOUT_FILENO;
+
     // FIXME: Setup epoll to listen on the input descriptors
+    // register for all the read fds
+    int epollfd = epoll_create1(0);
+
+    if (epollfd == -1)
+    {
+	    die("epoll_create1");
+    }
+
+    for (int i = 0; i< nprocs+1; i++ )
+    {
+	    epoll_add( epollfd, fd_pairs[i][read], EPOLLIN, i );
+    }
+
+    struct epoll_event events[10];
+
+    int pairs = nprocs+1;
+
+    uint64_t throughput[pairs];
+
+    memset(&throughput[0], 0x00, sizeof(throughput));
+
+
     // FIXME: Receive events and copy data around.
+    
+    while (pairs)
+    {
+	    int nfds = epoll_wait(epollfd, events, 10, -1);
+	    if (nfds == -1 )
+	    {
+		    die("epoll_wait");
+	    }
+	    for (int i = 0; i< nfds; i++)
+	    {
+		    uint64_t pair = events[i].data.u64;
+
+
+		    if (events[i].events & EPOLLIN)
+		    {
+			   uint64_t bytes = copy_splice(fd_pairs[pair][read], fd_pairs[pair][write]);
+			   throughput[pair] += bytes;
+
+		    }
+		    if (events[i].events & EPOLLHUP )
+		    {
+			    epoll_del(epollfd,fd_pairs[pair][read]);
+			    close(fd_pairs[pair][read]);
+			    close(fd_pairs[pair][write]);
+			    pairs--;
+		    }
+	    }
+
+
+    print_throughput(&throughput[0], pairs);
+
+    }
     // FIXME: call print_throughput from time to time.
 }
