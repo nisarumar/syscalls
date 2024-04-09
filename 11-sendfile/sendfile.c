@@ -19,16 +19,93 @@
 
 #define die(msg) do { perror(msg); exit(EXIT_FAILURE); } while(0)
 
+#define BUFF_SIZE	4096*32
+
 ssize_t copy_write(int fd_in, int fd_out, int *syscalls) {
     ssize_t ret = 0;
+    struct stat sb;
+    static char buff[BUFF_SIZE];
     *syscalls = 0;
+
+    ret = fstat(fd_in, &sb);
+    (*syscalls)++;
+
+    if (ret < 0)
+	    die("fstat");
+
+    ssize_t len = sb.st_size;
+
+    if (len <= 0)
+    {
+	    fprintf(stderr, "Bad input file size\n");
+	    exit(EXIT_FAILURE);
+    }
+
+    ssize_t bytes_xfer = 0; //bytes transferred
+
+
+    while (bytes_xfer < len)
+    {
+	    int bytes_cnt = 0;
+
+	    ssize_t xfer_size = len-bytes_xfer > sizeof(buff) ? sizeof(buff) : len-bytes_xfer;
+
+	    while (bytes_cnt < xfer_size)
+	    {
+		    ret = read(fd_in, &buff[bytes_cnt], xfer_size);
+		    (*syscalls)++;
+		    if (ret < 0)
+			    die ("read");
+		    bytes_cnt += ret;
+	    }
+
+	    bytes_cnt = 0;
+
+	    while (bytes_cnt < xfer_size)
+	    {
+		    ret = write(fd_out, &buff[bytes_cnt], xfer_size);
+		    (*syscalls)++;
+		    if (ret < 0)
+			    die("read");
+		    bytes_cnt += ret;
+	    }
+
+	    bytes_xfer += xfer_size;
+
+    }
+
+    ret = len;
+
+
     return ret;
 }
 
 ssize_t copy_sendfile(int fd_in, int fd_out, int *syscalls) {
     ssize_t ret = 0;
     *syscalls = 0;
-    return ret;
+    struct stat sb;
+
+    ret = fstat(fd_in, &sb);
+    (*syscalls)++;
+
+    if (ret < 0)
+	    die("fstat");
+
+    ssize_t len = sb.st_size;
+    ssize_t bytes_xfer = 0;
+
+    while (bytes_xfer < len)
+    {
+	    ret = sendfile(fd_out, fd_in, &bytes_xfer, len);
+	    (*syscalls)++;
+	    if (ret <= 0)
+		    die("sendfile");
+
+    }
+
+
+    ret = bytes_xfer;
+   return ret;
 }
 
 // This function measures the given copy implementation.
